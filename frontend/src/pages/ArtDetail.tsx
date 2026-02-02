@@ -1,12 +1,16 @@
+import { useState, useEffect } from 'react';
 import { useParams, Link, useNavigate, useLocation } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { motion } from 'framer-motion';
-import { votingGet, mintPost, votingPost } from '../lib/api';
+import { motion, AnimatePresence } from 'framer-motion';
+import { useAccount, useWriteContract, useReadContract, usePublicClient } from 'wagmi';
+import { formatEther } from 'ethers';
+import { AETHERIA_MARKETPLACE_ABI, AETHERIA_MARKETPLACE_ADDRESS, AETHERIA_NFT_ABI, AETHERIA_NFT_ADDRESS } from '../lib/contracts';
+import { votingGet, mintPost, votingPost, marketplaceGet } from '../lib/api';
 import { formatWallet, getLoggedInWallet, isLoggedIn } from '../lib/auth';
-import { useState, useEffect } from 'react';
 import { fadeInUp } from '../lib/animations';
 import Comments from '../components/Comments';
 import ShareButtons from '../components/ShareButtons';
+import ListingModal from '../components/ListingModal';
 
 type Artwork = {
   id: number;
@@ -31,9 +35,11 @@ export default function ArtDetail() {
   const [voteLoading, setVoteLoading] = useState(false);
   const [voteCount, setVoteCount] = useState<number | null>(null);
   const [hasVoted, setHasVoted] = useState(false);
+  const [isListingModalOpen, setIsListingModalOpen] = useState(false);
+  const [isBuying, setIsBuying] = useState(false);
 
   const creatorWallet = getLoggedInWallet();
-
+  const publicClient = usePublicClient();
   const { data: artwork, isLoading, error } = useQuery({
     queryKey: ['artwork', id],
     queryFn: async () => {
@@ -46,6 +52,102 @@ export default function ArtDetail() {
     retryDelay: 2000,
     staleTime: 30000,
   });
+
+  const { data: listing } = useQuery({
+    queryKey: ['listing', id],
+    queryFn: async () => {
+      if (!id) return null;
+      return marketplaceGet<any>(`/listings/${id}`).catch(() => null);
+    },
+    enabled: !!id
+  });
+
+  // Buy Hooks
+  // Safely derive arguments to avoid render crashes
+  const listingId = listing?.on_chain_id ? BigInt(listing.on_chain_id) : undefined;
+
+  const { data: currentPriceOnChain } = useReadContract({
+    address: AETHERIA_MARKETPLACE_ADDRESS,
+    abi: AETHERIA_MARKETPLACE_ABI,
+    functionName: 'getCurrentPrice',
+    args: listingId !== undefined ? [listingId] : undefined,
+    query: {
+      enabled: listingId !== undefined,
+      refetchInterval: 10000,
+    }
+  });
+
+  // Owner Check Hook
+  const { address: userAddress } = useAccount();
+  const { data: ownerAddress } = useReadContract({
+    address: AETHERIA_NFT_ADDRESS,
+    abi: AETHERIA_NFT_ABI,
+    functionName: 'ownerOf',
+    args: artwork?.token_id ? [BigInt(artwork.token_id)] : undefined,
+    query: {
+      enabled: !!artwork?.token_id && artwork.minted,
+      refetchInterval: 5000
+    }
+  });
+
+  const isOwner = userAddress && ownerAddress && userAddress.toLowerCase() === ownerAddress.toLowerCase();
+
+  const currentPriceFormatted = (() => {
+    try {
+      if (currentPriceOnChain) return formatEther(currentPriceOnChain);
+      if (listing && listing.price_start) return formatEther(listing.price_start.toString());
+      return '0';
+    } catch (e) {
+      console.error('Error formatting price:', e);
+      return '0';
+    }
+  })();
+
+  const { writeContractAsync: buyContract } = useWriteContract();
+
+  const handleBuy = async () => {
+    if (!listing || !isLoggedIn()) {
+      navigate('/login', { state: { from: location.pathname } });
+      return;
+    }
+    setIsBuying(true);
+    try {
+      const price = currentPriceOnChain || BigInt(listing.price_start);
+      console.log('Buying listing:', listing.on_chain_id, 'Price:', price);
+
+      const hash = await buyContract({
+        address: AETHERIA_MARKETPLACE_ADDRESS,
+        abi: AETHERIA_MARKETPLACE_ABI,
+        functionName: 'buy',
+        args: [BigInt(listing.on_chain_id)],
+        value: price
+      });
+
+      window.dispatchEvent(new CustomEvent('aetheria:toast', { detail: `Transaction sent: ${hash.slice(0, 10)}... Waiting for confirmation.` } as any));
+
+      if (publicClient) {
+        const receipt = await publicClient.waitForTransactionReceipt({ hash });
+        if (receipt.status === 'success') {
+          window.dispatchEvent(new CustomEvent('aetheria:toast', { detail: 'Purchase Successful! updating...' } as any));
+          // Wait a moment for backend watcher to sync DB
+          setTimeout(() => {
+            window.location.reload();
+          }, 2000);
+        } else {
+          throw new Error('Transaction reverted');
+        }
+      }
+
+    } catch (err: any) {
+      console.error(err);
+      window.dispatchEvent(new CustomEvent('aetheria:toast', { detail: `Purchase failed: ${err.message || 'Unknown error'}` } as any));
+      setIsBuying(false);
+    }
+  };
+
+
+
+
 
   useEffect(() => {
     if (!artwork) return;
@@ -72,7 +174,9 @@ export default function ArtDetail() {
     mutationFn: async () => {
       if (!creatorWallet || creatorWallet === '0x') throw new Error('Please log in or connect your wallet');
       setVoteLoading(true);
-      const response = await votingPost('/vote', { artworkId: artwork.id, voterWallet: creatorWallet });
+      if (!artwork) return;
+      const response = await votingPost<{ action: string }>('/vote', { artworkId: artwork.id, voterWallet: creatorWallet });
+
       setVoteLoading(false);
       return response;
     },
@@ -80,30 +184,33 @@ export default function ArtDetail() {
       setVoteLoading(false);
       let msg: string;
       try { msg = error?.message || error?.error || String(error); } catch { msg = 'Unknown voting error'; }
-      
+
       // If user already voted, update hasVoted state
       if (msg.includes('already voted') || error?.hasVoted) {
         setHasVoted(true);
       }
-      
+
       window.dispatchEvent(new CustomEvent('aetheria:toast', { detail: `Voting failed: ${msg}` } as any));
     },
     onSuccess: (response) => {
       // Handle both vote addition and removal
-      if (response.action === 'added') {
+      if ((response as any).action === 'added') {
+
         setHasVoted(true);
-        setVoteCount(c => (typeof c === 'number' ? c+1 : 1));
-      } else if (response.action === 'removed') {
+        setVoteCount(c => (typeof c === 'number' ? c + 1 : 1));
+      } else if ((response as any).action === 'removed') {
+
         setHasVoted(false);
-        setVoteCount(c => Math.max(0, (typeof c === 'number' ? c-1 : 0)));
+        setVoteCount(c => Math.max(0, (typeof c === 'number' ? c - 1 : 0)));
       }
-      qc.invalidateQueries(['artwork', id]);
+      qc.invalidateQueries({ queryKey: ['artwork', id] });
+
     },
   });
 
   const handleMint = async () => {
     if (!artwork || !canMint) return;
-    
+
     setMinting(true);
     try {
       // Note: This requires MINTER_AUTH_TOKEN - for MVP, this could be a user-initiated action
@@ -111,17 +218,17 @@ export default function ArtDetail() {
       const response = await mintPost<{ success: boolean; tx_hash: string; token_id: number }>('/mint', {
         artworkId: artwork.id
       });
-      
+
       if (response.success) {
-        window.dispatchEvent(new CustomEvent('aetheria:toast', { 
-          detail: `NFT minted! Token ID: ${response.token_id}` 
+        window.dispatchEvent(new CustomEvent('aetheria:toast', {
+          detail: `NFT minted! Token ID: ${response.token_id}`
         } as any));
         // Refresh artwork data
         window.location.reload();
       }
     } catch (error: any) {
-      window.dispatchEvent(new CustomEvent('aetheria:toast', { 
-        detail: `Minting failed: ${error.message || 'Unknown error'}` 
+      window.dispatchEvent(new CustomEvent('aetheria:toast', {
+        detail: `Minting failed: ${error.message || 'Unknown error'}`
       } as any));
     } finally {
       setMinting(false);
@@ -141,10 +248,10 @@ export default function ArtDetail() {
 
   if (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    const isConnectionError = errorMessage.toLowerCase().includes('timeout') || 
-                              errorMessage.toLowerCase().includes('network') ||
-                              errorMessage.toLowerCase().includes('invalid api url');
-    
+    const isConnectionError = errorMessage.toLowerCase().includes('timeout') ||
+      errorMessage.toLowerCase().includes('network') ||
+      errorMessage.toLowerCase().includes('invalid api url');
+
     return (
       <div className="flex items-center justify-center min-h-[60vh]">
         <div className="text-center max-w-md">
@@ -190,7 +297,7 @@ export default function ArtDetail() {
     );
   }
 
-  const etherscanUrl = artwork.tx_hash 
+  const etherscanUrl = artwork.tx_hash
     ? `https://sepolia.etherscan.io/tx/${artwork.tx_hash}`
     : null;
 
@@ -208,6 +315,14 @@ export default function ArtDetail() {
           alt={artwork.title}
           className="w-full rounded-xl border border-white/10 object-contain bg-card/30"
         />
+        {isOwner && (
+          <div className="absolute top-4 left-4 z-20">
+            <div className="px-4 py-2 bg-gradient-to-r from-purple-500 to-indigo-600 text-white font-bold rounded-full shadow-lg border border-white/20 flex items-center gap-2">
+              <span>👑</span>
+              <span>You Own This</span>
+            </div>
+          </div>
+        )}
         {(artwork.minted || isEligibleForMint) && (
           <div className="absolute top-4 right-4">
             {artwork.minted && (
@@ -234,12 +349,12 @@ export default function ArtDetail() {
         <div>
           <h1 className="text-4xl font-bold mb-4">{artwork.title}</h1>
           <p className="text-gray-300 leading-relaxed mb-4">{artwork.description}</p>
-          
+
           <div className="flex items-center gap-2 text-gray-400 mb-6">
             <span>by</span>
             <span className="font-mono text-accent">
-              {artwork.creator_wallet === '0x' 
-                ? 'Anonymous' 
+              {artwork.creator_wallet === '0x'
+                ? 'Anonymous'
                 : formatWallet(artwork.creator_wallet)}
             </span>
           </div>
@@ -299,8 +414,63 @@ export default function ArtDetail() {
           </motion.button>
         )}
 
+        {/* List for Sale Button (Owner only, if minted and not currently listed active) */}
+        {artwork.minted && isOwner && (!listing || listing.status !== 'ACTIVE') && (
+          <motion.button
+            whileHover={{ scale: 1.02 }}
+            whileTap={{ scale: 0.98 }}
+            onClick={() => setIsListingModalOpen(true)}
+            className="w-full px-6 py-4 mt-2 bg-gradient-to-r from-green-400 to-emerald-500 text-black font-bold rounded-xl hover:shadow-[0_0_30px_rgba(74,222,128,0.5)] transition-all"
+          >
+            List for Sale
+          </motion.button>
+        )}
+
+        {/* Buy Button (If listed) */}
+        {/* Buy Button (If listed and active) */}
+        {listing && listing.status === 'ACTIVE' && (
+          <div className="p-4 mt-4 border border-white/10 rounded-xl bg-card/30">
+            <div className="text-sm text-gray-400 mb-1">Current Price</div>
+            <div className="text-3xl font-bold text-highlight mb-4">
+              {currentPriceFormatted} ETH
+              {listing.price_start !== listing.price_end && (
+                <span className="text-sm text-gray-500 ml-2">(Dutch Auction)</span>
+              )}
+            </div>
+
+            {creatorWallet && creatorWallet.toLowerCase() === listing.seller_wallet.toLowerCase() ? (
+              <div className="w-full px-6 py-3 bg-white/10 text-center text-gray-400 font-bold rounded-lg border border-white/5">
+                You own this listing
+              </div>
+            ) : (
+              <motion.button
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.98 }}
+                onClick={handleBuy}
+                disabled={isBuying}
+                className="w-full px-6 py-3 bg-white text-black font-bold rounded-lg hover:shadow-[0_0_20px_rgba(255,255,255,0.3)] disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+              >
+                {isBuying ? 'Processing Purchase...' : 'Buy Now'}
+              </motion.button>
+            )}
+          </div>
+        )}
+
+        <ListingModal
+          isOpen={isListingModalOpen}
+          onClose={() => setIsListingModalOpen(false)}
+          artworkId={artwork.id}
+          tokenAddress={import.meta.env.VITE_CONTRACT_ADDRESS || ''}
+          tokenId={artwork.token_id || 0}
+          onSuccess={() => {
+            qc.invalidateQueries({ queryKey: ['listing', id] });
+
+            window.dispatchEvent(new CustomEvent('aetheria:toast', { detail: 'Item listed successfully!' } as any));
+          }}
+        />
+
         {/* Share Section */}
-        <ShareButtons 
+        <ShareButtons
           title={artwork.title}
           imageUrl={artwork.image_url}
           artworkId={artwork.id}
@@ -420,13 +590,68 @@ export default function ArtDetail() {
                 </div>
               </motion.div>
             )}
+
+            {/* Listing History */}
+            {listing && (
+              <motion.div
+                initial={{ opacity: 0, x: -20 }}
+                animate={{ opacity: 1, x: 0 }}
+                transition={{ delay: 0.4 }}
+                className="flex gap-4 relative z-10"
+              >
+                <div className="flex flex-col items-center">
+                  <div className="w-4 h-4 rounded-full bg-blue-500 shadow-lg" />
+                  <div className={`w-0.5 h-full ${listing.status === 'SOLD' ? 'bg-blue-500/30' : 'bg-gray-700'} mt-2`} />
+                </div>
+                <div className="flex-1 pb-6">
+                  <div className="font-semibold text-blue-400 mb-1 flex items-center gap-2">
+                    <span>🏷️</span>
+                    <span>Listed for Sale</span>
+                  </div>
+                  <div className="text-sm text-gray-400">
+                    {new Date(listing.created_at).toLocaleDateString('en-US', {
+                      year: 'numeric', month: 'long', day: 'numeric'
+                    })}
+                  </div>
+                  <div className="text-xs text-gray-500 mt-1">
+                    Price: {formatEther(listing.price_start.toString())} ETH
+                  </div>
+                </div>
+              </motion.div>
+            )}
+
+            {/* Sold Event */}
+            {listing && listing.status === 'SOLD' && (
+              <motion.div
+                initial={{ opacity: 0, x: -20 }}
+                animate={{ opacity: 1, x: 0 }}
+                transition={{ delay: 0.5 }}
+                className="flex gap-4 relative z-10"
+              >
+                <div className="flex flex-col items-center">
+                  <div className="w-4 h-4 rounded-full bg-green-500 shadow-lg" />
+                </div>
+                <div className="flex-1 pb-2">
+                  <div className="font-semibold text-green-400 mb-1 flex items-center gap-2">
+                    <span>🤝</span>
+                    <span>Sold to Collector</span>
+                  </div>
+                  <div className="text-sm text-gray-400">
+                    Purchased on Marketplace
+                  </div>
+                  <div className="text-xs text-gray-500 mt-1 font-mono">
+                    New Owner: {formatWallet(listing.seller_wallet)} (Previous) &rarr; New
+                  </div>
+                </div>
+              </motion.div>
+            )}
           </div>
         </div>
 
         {/* Back Button */}
         <Link
           to="/gallery"
-          className="text-center px-4 py-2 text-accent hover:underline"
+          className="text-center px-4 py-2 text-accent hover:underline block mt-4"
         >
           ← Back to Gallery
         </Link>

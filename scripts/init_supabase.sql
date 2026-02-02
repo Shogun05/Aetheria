@@ -1,85 +1,144 @@
--- Aetheria Database Schema
--- Run this script on your Supabase PostgreSQL database
+-- =====================================================
+-- AETHERIA DATABASE SCHEMA
+-- (Fully aligned with Normalization Diagram | 3NF)
+-- =====================================================
 
--- Enable UUID extension
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
-
--- Users table
-CREATE TABLE IF NOT EXISTS users (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  wallet_address text UNIQUE NOT NULL,
-  username text,
-  joined_at timestamptz DEFAULT now()
+-- =========================
+-- USERS TABLE
+-- =========================
+CREATE TABLE USERS (
+    user_id SERIAL PRIMARY KEY,
+    username VARCHAR(50) NOT NULL,
+    wallet_address VARCHAR(100) UNIQUE NOT NULL,
+    joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Artworks table
-CREATE TABLE IF NOT EXISTS artworks (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  title text,
-  description text,
-  image_url text,
-  metadata_uri text,
-  metadata_hash text,
-  token_id bigint,
-  tx_hash text,
-  creator_wallet text,
-  vote_count int DEFAULT 0,
-  minted boolean DEFAULT false,
-  created_at timestamptz DEFAULT now()
+-- =========================
+-- ARTWORKS TABLE
+-- =========================
+CREATE TABLE ARTWORKS (
+    artwork_id SERIAL PRIMARY KEY,
+    prompt_hash CHAR(64) NOT NULL,
+    prompt TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    ai_model VARCHAR(100),
+    title VARCHAR(150),
+    description TEXT,
+    image_url TEXT NOT NULL,
+    metadata_hash CHAR(64) NOT NULL,
+    metadata_url TEXT,
+    token_id INT,
+    tx_hash VARCHAR(100),
+    creator_hash CHAR(64),
+    creator_wallet VARCHAR(100) NOT NULL,
+    featured BOOLEAN DEFAULT FALSE,
+    user_id INT NOT NULL,
+
+    FOREIGN KEY (user_id)
+        REFERENCES USERS(user_id)
+        ON DELETE CASCADE
 );
 
--- Votes table
-CREATE TABLE IF NOT EXISTS votes (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_wallet text NOT NULL,
-  artwork_id uuid REFERENCES artworks(id) ON DELETE CASCADE,
-  created_at timestamptz DEFAULT now(),
-  UNIQUE (user_wallet, artwork_id)
+-- =========================
+-- VOTES TABLE
+-- =========================
+CREATE TABLE VOTES (
+    vote_id SERIAL PRIMARY KEY,
+    user_id INT NOT NULL,
+    artwork_id INT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    vote_count INT DEFAULT 1,
+
+    FOREIGN KEY (user_id)
+        REFERENCES USERS(user_id)
+        ON DELETE CASCADE,
+
+    FOREIGN KEY (artwork_id)
+        REFERENCES ARTWORKS(artwork_id)
+        ON DELETE CASCADE,
+
+    UNIQUE (user_id, artwork_id)
 );
 
--- Indexes for performance
-CREATE INDEX IF NOT EXISTS idx_artworks_creator ON artworks(creator_wallet);
-CREATE INDEX IF NOT EXISTS idx_artworks_minted ON artworks(minted);
-CREATE INDEX IF NOT EXISTS idx_artworks_vote_count ON artworks(vote_count DESC);
-CREATE INDEX IF NOT EXISTS idx_votes_artwork ON votes(artwork_id);
-CREATE INDEX IF NOT EXISTS idx_votes_user ON votes(user_wallet);
+-- =====================================================
+-- COMMENTS (3NF DECOMPOSITION)
+-- =====================================================
 
--- Row Level Security (RLS) policies
-ALTER TABLE users ENABLE ROW LEVEL SECURITY;
-ALTER TABLE artworks ENABLE ROW LEVEL SECURITY;
-ALTER TABLE votes ENABLE ROW LEVEL SECURITY;
+-- COMMENTS_A : reply_id → artwork_id
+CREATE TABLE COMMENTS_A (
+    reply_id INT PRIMARY KEY,
+    artwork_id INT NOT NULL,
 
--- Allow public read access to artworks
-CREATE POLICY "Public read access to artworks" ON artworks
-  FOR SELECT
-  USING (true);
+    FOREIGN KEY (artwork_id)
+        REFERENCES ARTWORKS(artwork_id)
+        ON DELETE CASCADE
+);
 
--- Allow public read access to users
-CREATE POLICY "Public read access to users" ON users
-  FOR SELECT
-  USING (true);
+-- COMMENTS_B : comment details
+CREATE TABLE COMMENTS_B (
+    comment_id SERIAL PRIMARY KEY,
+    edited_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    body TEXT NOT NULL,
+    reply_id INT,
+    user_id INT NOT NULL,
 
--- Allow public read access to votes
-CREATE POLICY "Public read access to votes" ON votes
-  FOR SELECT
-  USING (true);
+    FOREIGN KEY (reply_id)
+        REFERENCES COMMENTS_A(reply_id)
+        ON DELETE CASCADE,
 
--- Allow service role to do everything
-CREATE POLICY "Service role full access" ON artworks
-  FOR ALL
-  TO service_role
-  USING (true)
-  WITH CHECK (true);
+    FOREIGN KEY (user_id)
+        REFERENCES USERS(user_id)
+        ON DELETE CASCADE
+);
 
-CREATE POLICY "Service role full access" ON users
-  FOR ALL
-  TO service_role
-  USING (true)
-  WITH CHECK (true);
+-- =====================================================
+-- MINTS (3NF DECOMPOSITION)
+-- =====================================================
 
-CREATE POLICY "Service role full access" ON votes
-  FOR ALL
-  TO service_role
-  USING (true)
-  WITH CHECK (true);
+-- MINTS_MAP : Mint_Id → tx_hash
+CREATE TABLE MINTS_MAP (
+    mint_id SERIAL PRIMARY KEY,
+    tx_hash VARCHAR(100) UNIQUE NOT NULL
+);
 
+-- MINTS_B : tx_hash → mint attributes
+CREATE TABLE MINTS_B (
+    tx_hash VARCHAR(100) PRIMARY KEY,
+    owner_wallet VARCHAR(100) NOT NULL,
+    contact_address TEXT,
+    token_id INT UNIQUE NOT NULL,
+    royalties_bps INT,
+    minted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    artwork_id INT NOT NULL,
+
+    FOREIGN KEY (tx_hash)
+        REFERENCES MINTS_MAP(tx_hash)
+        ON DELETE CASCADE,
+
+    FOREIGN KEY (artwork_id)
+        REFERENCES ARTWORKS(artwork_id)
+        ON DELETE CASCADE
+);
+
+-- =====================================================
+-- MARKETPLACE
+-- =====================================================
+
+CREATE TABLE MARKET_LISTINGS (
+    listing_id SERIAL PRIMARY KEY,
+    artwork_id INT NOT NULL,
+    seller_wallet VARCHAR(100) NOT NULL,
+    price_start NUMERIC(20, 0) NOT NULL, -- Stored in Wei
+    price_end NUMERIC(20, 0) NOT NULL, -- Stored in Wei
+    starts_at TIMESTAMP NOT NULL,
+    ends_at TIMESTAMP NOT NULL,
+    duration INT NOT NULL, -- Seconds
+    status VARCHAR(20) DEFAULT 'ACTIVE', -- ACTIVE, SOLD, CANCELLED
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    on_chain_id INT, -- ID from Smart Contract
+
+    FOREIGN KEY (artwork_id)
+        REFERENCES ARTWORKS(artwork_id)
+        ON DELETE CASCADE
+);

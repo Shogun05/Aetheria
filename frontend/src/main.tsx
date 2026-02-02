@@ -16,6 +16,7 @@ import Upload from './pages/Upload';
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
 import ArtDetail from './pages/ArtDetail';
+import Marketplace from './pages/Marketplace';
 import Help from './pages/Help';
 import Profile from './pages/Profile';
 import Admin from './pages/Admin';
@@ -35,6 +36,7 @@ function AppShell() {
           <Route path="/" element={<Home />} />
           <Route path="/gallery" element={<Gallery />} />
           <Route path="/featured" element={<Featured />} />
+          <Route path="/marketplace" element={<Marketplace />} />
           <Route path="/upload" element={<Upload />} />
           <Route path="/art/:id" element={<ArtDetail />} />
           <Route path="/login" element={<Login />} />
