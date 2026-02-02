@@ -5,7 +5,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { useAccount, useWriteContract, useReadContract, usePublicClient } from 'wagmi';
 import { formatEther } from 'ethers';
 import { AETHERIA_MARKETPLACE_ABI, AETHERIA_MARKETPLACE_ADDRESS, AETHERIA_NFT_ABI, AETHERIA_NFT_ADDRESS } from '../lib/contracts';
-import { votingGet, mintPost, votingPost, marketplaceGet } from '../lib/api';
+import { votingGet, mintPost, votingPost, marketplaceGet, marketplacePost } from '../lib/api';
 import { formatWallet, getLoggedInWallet, isLoggedIn } from '../lib/auth';
 import { fadeInUp } from '../lib/animations';
 import Comments from '../components/Comments';
@@ -37,6 +37,7 @@ export default function ArtDetail() {
   const [hasVoted, setHasVoted] = useState(false);
   const [isListingModalOpen, setIsListingModalOpen] = useState(false);
   const [isBuying, setIsBuying] = useState(false);
+  const [showAllHistory, setShowAllHistory] = useState(false);
 
   const creatorWallet = getLoggedInWallet();
   const publicClient = usePublicClient();
@@ -53,14 +54,29 @@ export default function ArtDetail() {
     staleTime: 30000,
   });
 
-  const { data: listing } = useQuery({
-    queryKey: ['listing', id],
+  // Fetch ALL listings for this artwork (for provenance history)
+  // First verify on-chain status to ensure DB is in sync
+  const { data: listings = [], refetch: refetchListings } = useQuery({
+    queryKey: ['listings', id],
     queryFn: async () => {
-      if (!id) return null;
-      return marketplaceGet<any>(`/listings/${id}`).catch(() => null);
+      if (!id) return [];
+      // First trigger verification to sync DB with on-chain state
+      try {
+        await marketplaceGet(`/listings/${id}/verify`);
+      } catch (e) {
+        console.warn('[ArtDetail] Verify endpoint failed, continuing with cached data');
+      }
+      // Then fetch the (now synced) listings
+      return marketplaceGet<any[]>(`/listings/${id}`).catch(() => []);
     },
-    enabled: !!id
+    enabled: !!id,
+    staleTime: 10000 // Cache for 10 seconds to avoid excessive on-chain calls
   });
+
+  // Active listing is the first one with status ACTIVE (most recent)
+  const activeListing = listings.find((l: any) => l.status === 'ACTIVE');
+  // For backwards compatibility, use activeListing for buy/price logic
+  const listing = activeListing;
 
   // Buy Hooks
   // Safely derive arguments to avoid render crashes
@@ -91,6 +107,41 @@ export default function ArtDetail() {
   });
 
   const isOwner = userAddress && ownerAddress && userAddress.toLowerCase() === ownerAddress.toLowerCase();
+
+  // Debug logging for owner badge
+  useEffect(() => {
+    if (artwork?.minted) {
+      console.log('[Owner Debug]', {
+        userAddress,
+        ownerAddress,
+        tokenId: artwork?.token_id,
+        minted: artwork?.minted,
+        isOwner
+      });
+    }
+  }, [userAddress, ownerAddress, artwork?.token_id, artwork?.minted, isOwner]);
+
+  // Auto-cleanup stale listings when owner is detected
+  useEffect(() => {
+    const cleanupStaleListing = async () => {
+      // Only run if user is owner and there's an active listing from someone else
+      if (isOwner && listing && listing.status === 'ACTIVE' && userAddress) {
+        // Check if seller is different from current owner
+        if (listing.seller_wallet.toLowerCase() !== userAddress.toLowerCase()) {
+          console.log('[Auto-Cleanup] Detected stale listing, cleaning up...');
+          try {
+            await marketplacePost(`/listings/${id}/cleanup`, { ownerWallet: userAddress });
+            console.log('[Auto-Cleanup] Stale listing cleaned up successfully');
+            refetchListings();
+          } catch (err: any) {
+            console.error('[Auto-Cleanup] Failed to clean up stale listing:', err.message);
+          }
+        }
+      }
+    };
+
+    cleanupStaleListing();
+  }, [isOwner, listing, userAddress, id, refetchListings]);
 
   const currentPriceFormatted = (() => {
     try {
@@ -128,11 +179,24 @@ export default function ArtDetail() {
       if (publicClient) {
         const receipt = await publicClient.waitForTransactionReceipt({ hash });
         if (receipt.status === 'success') {
-          window.dispatchEvent(new CustomEvent('aetheria:toast', { detail: 'Purchase Successful! updating...' } as any));
-          // Wait a moment for backend watcher to sync DB
+          window.dispatchEvent(new CustomEvent('aetheria:toast', { detail: 'Purchase Successful! Updating database...' } as any));
+
+          // Directly update the listing to SOLD in the database (don't rely on event watcher)
+          try {
+            await marketplacePost('/listings/mark-sold', {
+              listingId: listing.on_chain_id,
+              buyerWallet: userAddress,
+              txHash: hash
+            });
+            console.log('[Purchase] Listing marked as SOLD in database');
+          } catch (dbErr: any) {
+            console.error('[Purchase] Failed to update DB directly:', dbErr.message);
+          }
+
+          // Refresh the page to show updated state
           setTimeout(() => {
             window.location.reload();
-          }, 2000);
+          }, 1000);
         } else {
           throw new Error('Transaction reverted');
         }
@@ -350,14 +414,35 @@ export default function ArtDetail() {
           <h1 className="text-4xl font-bold mb-4">{artwork.title}</h1>
           <p className="text-gray-300 leading-relaxed mb-4">{artwork.description}</p>
 
-          <div className="flex items-center gap-2 text-gray-400 mb-6">
-            <span>by</span>
-            <span className="font-mono text-accent">
-              {artwork.creator_wallet === '0x'
-                ? 'Anonymous'
-                : formatWallet(artwork.creator_wallet)}
-            </span>
-          </div>
+          {/* Dynamic ownership display */}
+          {artwork.minted && ownerAddress ? (
+            <div className="flex flex-col gap-2 mb-6">
+              <div className="flex items-center gap-2 text-gray-400">
+                <span>Created by</span>
+                <span className="font-mono text-gray-500">
+                  {artwork.creator_wallet === '0x' ? 'Anonymous' : formatWallet(artwork.creator_wallet)}
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-purple-400 font-semibold">Current Owner:</span>
+                <span className="font-mono text-accent">
+                  {formatWallet(ownerAddress as string)}
+                </span>
+                {isOwner && (
+                  <span className="px-2 py-0.5 bg-gradient-to-r from-purple-500 to-indigo-600 text-white text-xs font-bold rounded-full">
+                    👑 You
+                  </span>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="flex items-center gap-2 text-gray-400 mb-6">
+              <span>by</span>
+              <span className="font-mono text-accent">
+                {artwork.creator_wallet === '0x' ? 'Anonymous' : formatWallet(artwork.creator_wallet)}
+              </span>
+            </div>
+          )}
         </div>
 
         {/* Stats */}
@@ -427,8 +512,8 @@ export default function ArtDetail() {
         )}
 
         {/* Buy Button (If listed) */}
-        {/* Buy Button (If listed and active) */}
-        {listing && listing.status === 'ACTIVE' && (
+        {/* Buy Button (If listed and active and user is NOT the owner) */}
+        {listing && listing.status === 'ACTIVE' && !isOwner && (
           <div className="p-4 mt-4 border border-white/10 rounded-xl bg-card/30">
             <div className="text-sm text-gray-400 mb-1">Current Price</div>
             <div className="text-3xl font-bold text-highlight mb-4">
@@ -438,21 +523,27 @@ export default function ArtDetail() {
               )}
             </div>
 
-            {creatorWallet && creatorWallet.toLowerCase() === listing.seller_wallet.toLowerCase() ? (
-              <div className="w-full px-6 py-3 bg-white/10 text-center text-gray-400 font-bold rounded-lg border border-white/5">
-                You own this listing
-              </div>
-            ) : (
-              <motion.button
-                whileHover={{ scale: 1.02 }}
-                whileTap={{ scale: 0.98 }}
-                onClick={handleBuy}
-                disabled={isBuying}
-                className="w-full px-6 py-3 bg-white text-black font-bold rounded-lg hover:shadow-[0_0_20px_rgba(255,255,255,0.3)] disabled:opacity-50 disabled:cursor-not-allowed transition-all"
-              >
-                {isBuying ? 'Processing Purchase...' : 'Buy Now'}
-              </motion.button>
-            )}
+            <motion.button
+              whileHover={{ scale: 1.02 }}
+              whileTap={{ scale: 0.98 }}
+              onClick={handleBuy}
+              disabled={isBuying}
+              className="w-full px-6 py-3 bg-white text-black font-bold rounded-lg hover:shadow-[0_0_20px_rgba(255,255,255,0.3)] disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+            >
+              {isBuying ? 'Processing Purchase...' : 'Buy Now'}
+            </motion.button>
+          </div>
+        )}
+
+        {/* Auto-cleanup indicator (cleanup happens automatically in useEffect) */}
+        {listing && listing.status === 'ACTIVE' && isOwner && listing.seller_wallet.toLowerCase() !== userAddress?.toLowerCase() && (
+          <div className="p-4 mt-4 border border-blue-500/30 rounded-xl bg-blue-500/10">
+            <div className="text-blue-400 font-semibold flex items-center gap-2">
+              🔄 Cleaning up stale listing...
+            </div>
+            <p className="text-sm text-gray-400 mt-2">
+              Found an old listing from a previous owner. Automatically updating database...
+            </p>
           </div>
         )}
 
@@ -591,59 +682,122 @@ export default function ArtDetail() {
               </motion.div>
             )}
 
-            {/* Listing History */}
-            {listing && (
-              <motion.div
-                initial={{ opacity: 0, x: -20 }}
-                animate={{ opacity: 1, x: 0 }}
-                transition={{ delay: 0.4 }}
-                className="flex gap-4 relative z-10"
-              >
-                <div className="flex flex-col items-center">
-                  <div className="w-4 h-4 rounded-full bg-blue-500 shadow-lg" />
-                  <div className={`w-0.5 h-full ${listing.status === 'SOLD' ? 'bg-blue-500/30' : 'bg-gray-700'} mt-2`} />
-                </div>
-                <div className="flex-1 pb-6">
-                  <div className="font-semibold text-blue-400 mb-1 flex items-center gap-2">
-                    <span>🏷️</span>
-                    <span>Listed for Sale</span>
-                  </div>
-                  <div className="text-sm text-gray-400">
-                    {new Date(listing.created_at).toLocaleDateString('en-US', {
-                      year: 'numeric', month: 'long', day: 'numeric'
-                    })}
-                  </div>
-                  <div className="text-xs text-gray-500 mt-1">
-                    Price: {formatEther(listing.price_start.toString())} ETH
-                  </div>
-                </div>
-              </motion.div>
-            )}
+            {/* Marketplace History - All Listings */}
+            {listings.length > 0 && (
+              <>
+                {/* Show first (most recent) listing always */}
+                {(() => {
+                  // Reverse to show oldest first in timeline order
+                  const orderedListings = [...listings].reverse();
+                  const visibleListings = showAllHistory ? orderedListings : orderedListings.slice(-2);
+                  const hiddenCount = orderedListings.length - 2;
 
-            {/* Sold Event */}
-            {listing && listing.status === 'SOLD' && (
-              <motion.div
-                initial={{ opacity: 0, x: -20 }}
-                animate={{ opacity: 1, x: 0 }}
-                transition={{ delay: 0.5 }}
-                className="flex gap-4 relative z-10"
-              >
-                <div className="flex flex-col items-center">
-                  <div className="w-4 h-4 rounded-full bg-green-500 shadow-lg" />
-                </div>
-                <div className="flex-1 pb-2">
-                  <div className="font-semibold text-green-400 mb-1 flex items-center gap-2">
-                    <span>🤝</span>
-                    <span>Sold to Collector</span>
-                  </div>
-                  <div className="text-sm text-gray-400">
-                    Purchased on Marketplace
-                  </div>
-                  <div className="text-xs text-gray-500 mt-1 font-mono">
-                    New Owner: {formatWallet(listing.seller_wallet)} (Previous) &rarr; New
-                  </div>
-                </div>
-              </motion.div>
+                  return (
+                    <>
+                      {/* Show More Toggle */}
+                      {hiddenCount > 0 && !showAllHistory && (
+                        <motion.button
+                          onClick={() => setShowAllHistory(true)}
+                          className="text-sm text-accent hover:underline mb-4 flex items-center gap-2"
+                          whileHover={{ scale: 1.02 }}
+                        >
+                          <span>📜</span>
+                          <span>Show {hiddenCount} earlier transaction{hiddenCount > 1 ? 's' : ''}...</span>
+                        </motion.button>
+                      )}
+
+                      <AnimatePresence>
+                        {visibleListings.map((historyListing: any, index: number) => (
+                          <motion.div
+                            key={historyListing.listing_id || index}
+                            initial={{ opacity: 0, x: -20 }}
+                            animate={{ opacity: 1, x: 0 }}
+                            exit={{ opacity: 0, height: 0 }}
+                            transition={{ delay: 0.1 * index }}
+                            className="relative z-10"
+                          >
+                            {/* Listed Event */}
+                            <div className="flex gap-4">
+                              <div className="flex flex-col items-center">
+                                <div className="w-4 h-4 rounded-full bg-blue-500 shadow-lg" />
+                                <div className={`w-0.5 h-full ${historyListing.status === 'SOLD' ? 'bg-green-500/30' : 'bg-gray-700'} mt-2`} />
+                              </div>
+                              <div className="flex-1 pb-4">
+                                <div className="font-semibold text-blue-400 mb-1 flex items-center gap-2">
+                                  <span>🏷️</span>
+                                  <span>Listed for Sale</span>
+                                  {historyListing.status === 'ACTIVE' && (
+                                    <span className="text-xs bg-green-500/20 text-green-400 px-2 py-0.5 rounded-full">Active</span>
+                                  )}
+                                </div>
+                                <div className="text-sm text-gray-400">
+                                  {new Date(historyListing.created_at).toLocaleDateString('en-US', {
+                                    year: 'numeric', month: 'long', day: 'numeric'
+                                  })}
+                                </div>
+                                <div className="text-xs text-gray-500 mt-1">
+                                  Price: {formatEther(historyListing.price_start.toString())} ETH
+                                </div>
+                                <div className="text-xs text-gray-500 mt-1 font-mono">
+                                  Seller: {formatWallet(historyListing.seller_wallet)}
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* Sold Event (if applicable) */}
+                            {historyListing.status === 'SOLD' && (
+                              <div className="flex gap-4 mt-2">
+                                <div className="flex flex-col items-center">
+                                  <div className="w-4 h-4 rounded-full bg-green-500 shadow-lg" />
+                                  {index < visibleListings.length - 1 && (
+                                    <div className="w-0.5 h-full bg-gray-700 mt-2" />
+                                  )}
+                                </div>
+                                <div className="flex-1 pb-4">
+                                  <div className="font-semibold text-green-400 mb-1 flex items-center gap-2">
+                                    <span>🤝</span>
+                                    <span>Sold to Collector</span>
+                                  </div>
+                                  <div className="text-sm text-gray-400">
+                                    Purchased on Marketplace
+                                  </div>
+                                  {historyListing.buyer_wallet && (
+                                    <div className="text-xs text-gray-500 mt-1 font-mono">
+                                      Buyer: {formatWallet(historyListing.buyer_wallet)}
+                                    </div>
+                                  )}
+                                  {historyListing.tx_hash && (
+                                    <a
+                                      href={`https://sepolia.etherscan.io/tx/${historyListing.tx_hash}`}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="text-xs text-green-400 hover:underline mt-2 inline-flex items-center gap-1"
+                                    >
+                                      View on Etherscan ↗
+                                    </a>
+                                  )}
+                                </div>
+                              </div>
+                            )}
+                          </motion.div>
+                        ))}
+                      </AnimatePresence>
+
+                      {/* Collapse Button */}
+                      {showAllHistory && hiddenCount > 0 && (
+                        <motion.button
+                          onClick={() => setShowAllHistory(false)}
+                          className="text-sm text-gray-500 hover:text-accent mb-4 flex items-center gap-2"
+                          whileHover={{ scale: 1.02 }}
+                        >
+                          <span>▲</span>
+                          <span>Show less</span>
+                        </motion.button>
+                      )}
+                    </>
+                  );
+                })()}
+              </>
             )}
           </div>
         </div>

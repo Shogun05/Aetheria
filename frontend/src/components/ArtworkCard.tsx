@@ -92,8 +92,8 @@ export default function ArtworkCard({ id, title, imageUrl, votes, creatorWallet,
           <h3 className="font-semibold truncate mr-2 group-hover:text-accent transition-colors duration-200">{title}</h3>
           <motion.button
             className={`px-3 py-1.5 rounded-md text-sm font-medium transition-all duration-300 ${hasVoted
-                ? 'bg-accent/50 text-white border border-accent'
-                : 'bg-accent text-black hover:bg-highlight hover:scale-110 hover:shadow-[0_0_20px_rgba(124,247,240,0.5)]'
+              ? 'bg-accent/50 text-white border border-accent'
+              : 'bg-accent text-black hover:bg-highlight hover:scale-110 hover:shadow-[0_0_20px_rgba(124,247,240,0.5)]'
               }`}
             onClick={handleVote}
             disabled={hasVoted}
@@ -108,11 +108,16 @@ export default function ArtworkCard({ id, title, imageUrl, votes, creatorWallet,
             </motion.span>
           </motion.button>
         </div>
-        {creatorWallet && (
+        {/* Dynamic ownership display */}
+        {minted && ownerAddress ? (
+          <p className="text-xs text-gray-400 truncate flex items-center gap-1">
+            <span className="text-purple-400">Owner:</span> {formatWallet(ownerAddress as string)}
+          </p>
+        ) : creatorWallet ? (
           <p className="text-xs text-gray-400 truncate">
             by {creatorWallet === '0x' ? 'Anonymous' : formatWallet(creatorWallet)}
           </p>
-        )}
+        ) : null}
       </div>
     </motion.article>
   );
