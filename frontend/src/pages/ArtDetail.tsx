@@ -95,7 +95,7 @@ export default function ArtDetail() {
 
   // Owner Check Hook
   const { address: userAddress } = useAccount();
-  const { data: ownerAddress } = useReadContract({
+  const { data: onChainOwner } = useReadContract({
     address: AETHERIA_NFT_ADDRESS,
     abi: AETHERIA_NFT_ABI,
     functionName: 'ownerOf',
@@ -105,6 +105,13 @@ export default function ArtDetail() {
       refetchInterval: 5000
     }
   });
+
+  // Determine the effective owner:
+  // - For minted NFTs: use on-chain ownerOf()
+  // - For unminted artworks: creator_wallet is the owner
+  const ownerAddress = artwork?.minted && onChainOwner
+    ? onChainOwner
+    : artwork?.creator_wallet;
 
   const isOwner = userAddress && ownerAddress && userAddress.toLowerCase() === ownerAddress.toLowerCase();
 
@@ -415,7 +422,7 @@ export default function ArtDetail() {
           <p className="text-gray-300 leading-relaxed mb-4">{artwork.description}</p>
 
           {/* Dynamic ownership display */}
-          {artwork.minted && ownerAddress ? (
+          {ownerAddress ? (
             <div className="flex flex-col gap-2 mb-6">
               <div className="flex items-center gap-2 text-gray-400">
                 <span>Created by</span>
@@ -424,7 +431,9 @@ export default function ArtDetail() {
                 </span>
               </div>
               <div className="flex items-center gap-2">
-                <span className="text-purple-400 font-semibold">Current Owner:</span>
+                <span className="text-purple-400 font-semibold">
+                  {artwork.minted ? 'Current Owner:' : 'Owner (Creator):'}
+                </span>
                 <span className="font-mono text-accent">
                   {formatWallet(ownerAddress as string)}
                 </span>
