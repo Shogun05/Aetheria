@@ -560,8 +560,8 @@ export default function ArtDetail() {
           isOpen={isListingModalOpen}
           onClose={() => setIsListingModalOpen(false)}
           artworkId={artwork.id}
-          tokenAddress={import.meta.env.VITE_CONTRACT_ADDRESS || ''}
-          tokenId={artwork.token_id || 0}
+          tokenAddress={AETHERIA_NFT_ADDRESS}
+          tokenId={artwork.token_id ?? -1}
           onSuccess={() => {
             qc.invalidateQueries({ queryKey: ['listing', id] });
 

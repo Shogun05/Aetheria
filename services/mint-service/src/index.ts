@@ -69,7 +69,7 @@ app.post('/mint', async (req: Request, res: Response) => {
     const authHeader = req.headers['authorization'] || '';
     const token = Array.isArray(authHeader) ? authHeader[0] : authHeader;
     const bearer = token.startsWith('Bearer ') ? token.slice(7) : '';
-    
+
     if (!bearer) {
       return res.status(401).json({ error: 'Unauthorized: missing auth token' });
     }
@@ -78,7 +78,7 @@ app.post('/mint', async (req: Request, res: Response) => {
     const isSecretToken = bearer === process.env.MINTER_AUTH_TOKEN;
     const normalizedBearer = bearer.toLowerCase();
     const isWalletAddress = normalizedBearer.startsWith('0x') && ethers.isAddress(normalizedBearer);
-    
+
     if (!isSecretToken && !isWalletAddress) {
       return res.status(401).json({ error: 'Unauthorized: invalid authentication token' });
     }
@@ -117,7 +117,7 @@ app.post('/mint', async (req: Request, res: Response) => {
     // If metadata_uri doesn't exist, create it via metadata service
     if (!artwork.metadata_uri) {
       console.log(`Metadata not found for artwork ${artworkId}, creating it via metadata service...`);
-      
+
       try {
         // Call metadata service to create and pin metadata to IPFS
         const metadataServiceUrl = process.env.METADATA_SERVICE_URL || 'http://metadata-service:4003';
@@ -158,7 +158,7 @@ app.post('/mint', async (req: Request, res: Response) => {
         }
 
         artwork = updatedArtwork;
-        
+
         // If still no metadata_uri after calling service, use fallback
         if (!artwork.metadata_uri) {
           const metadata_uri = `ipfs://QmMock${artworkId.replace(/-/g, '')}`;
@@ -194,8 +194,8 @@ app.post('/mint', async (req: Request, res: Response) => {
     // Verify user is the creator (unless using MINTER_AUTH_TOKEN)
     if (creatorWallet) {
       if (artwork.creator_wallet?.toLowerCase() !== creatorWallet) {
-        return res.status(403).json({ 
-          error: 'Forbidden: Only the artwork creator can mint this NFT' 
+        return res.status(403).json({
+          error: 'Forbidden: Only the artwork creator can mint this NFT'
         });
       }
     } else if (bearer !== process.env.MINTER_AUTH_TOKEN) {
@@ -204,8 +204,8 @@ app.post('/mint', async (req: Request, res: Response) => {
 
     // Verify artwork has at least 3 votes
     if (artwork.vote_count < 3) {
-      return res.status(400).json({ 
-        error: `Artwork needs at least 3 votes to be minted. Current votes: ${artwork.vote_count}` 
+      return res.status(400).json({
+        error: `Artwork needs at least 3 votes to be minted. Current votes: ${artwork.vote_count}`
       });
     }
 
@@ -221,13 +221,13 @@ app.post('/mint', async (req: Request, res: Response) => {
     const tx = await contract.mintArtwork(artwork.creator_wallet, artwork.metadata_uri);
 
     console.log(`Transaction sent: ${tx.hash}`);
-    
+
     // Get token ID from the transaction return value (more reliable than parsing events)
-    let tokenId: number;
+    let tokenId: number | null = null;
     try {
       // The mintArtwork function returns the tokenId directly
       const receipt = await tx.wait();
-      
+
       // Try to parse from event first, fallback to contract query
       const mintEvent = receipt?.logs?.find(
         (log: any) => log.topics && log.topics[0] === ethers.id('Minted(address,uint256,string)')
@@ -235,13 +235,13 @@ app.post('/mint', async (req: Request, res: Response) => {
 
       if (mintEvent && mintEvent.topics && mintEvent.topics[2]) {
         tokenId = Number(BigInt(mintEvent.topics[2]));
+        console.log(`✅ Parsed token ID from event: ${tokenId}`);
       } else {
-        // Fallback: query the contract for the latest token (since function returns tokenId)
-        // We can use totalSupply() - 1 or parse from receipt
-        // Since the function returns uint256, we can try to decode the return value
-        console.log('Event parsing failed, using fallback method');
+        // Fallback: query the contract for the latest token
+        console.log('⚠️ Event parsing failed, querying totalSupply...');
         const totalSupply = await contract.totalSupply();
         tokenId = Number(totalSupply);
+        console.log(`✅ Got token ID from totalSupply: ${tokenId}`);
       }
     } catch (parseError: any) {
       console.error('Error parsing transaction:', parseError);
@@ -249,11 +249,21 @@ app.post('/mint', async (req: Request, res: Response) => {
       try {
         const totalSupply = await contract.totalSupply();
         tokenId = Number(totalSupply);
+        console.log(`✅ Got token ID from totalSupply (fallback): ${tokenId}`);
       } catch (supplyError: any) {
         console.error('Failed to get totalSupply:', supplyError);
-        // If all else fails, we at least have the tx hash
-        tokenId = 0; // Will be updated later if needed
+        // DO NOT save token_id = 0, this causes listing bugs!
+        tokenId = null;
       }
+    }
+
+    // Validate token ID before saving - contract starts at 1
+    if (tokenId === null || tokenId < 1) {
+      console.error(`❌ Invalid token ID: ${tokenId}. Cannot save to database.`);
+      return res.status(500).json({
+        error: 'Minting succeeded but failed to retrieve token ID. Please check transaction manually.',
+        tx_hash: tx.hash
+      });
     }
 
     // Update artwork record

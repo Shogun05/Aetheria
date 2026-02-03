@@ -42,7 +42,7 @@ export default function ListingModal({ isOpen, onClose, artworkId, tokenAddress,
 
     const isApproved = approvedAddress === AETHERIA_MARKETPLACE_ADDRESS || isApprovedForAll;
 
-    // Approve Contract Hook
+    // Approve Contract Hooks
     const { writeContractAsync: approveContract } = useWriteContract();
 
     // List Item Hook
@@ -51,12 +51,20 @@ export default function ListingModal({ isOpen, onClose, artworkId, tokenAddress,
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
         setError(null);
+
+        // Validate token ID before proceeding (contract token IDs start at 1)
+        console.log('[ListingModal] Token ID passed:', tokenId, 'Type:', typeof tokenId);
+        if (tokenId === undefined || tokenId === null || tokenId < 1) {
+            setError(`Cannot list: Invalid token ID (${tokenId}). The artwork may not be properly minted.`);
+            return;
+        }
+
         setListingStep('approving');
 
         try {
             // 1. Approve if needed
             if (!isApproved) {
-                console.log('Approving marketplace...');
+                console.log('[ListingModal] Approving marketplace for token:', tokenId);
                 const hash = await approveContract({
                     address: tokenAddress as `0x${string}`,
                     abi: AETHERIA_NFT_ABI,
