@@ -3,7 +3,7 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-const NFT_ADDRESS = '0x85a4cE9d57188F598A8A8f708D4e9C12c51B6d74';
+const NFT_ADDRESS = process.env.CONTRACT_ADDRESS || '';
 const NFT_ABI = [
     "function ownerOf(uint256 tokenId) view returns (address)",
     "function getApproved(uint256 tokenId) view returns (address)",

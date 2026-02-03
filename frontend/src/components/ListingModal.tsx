@@ -42,7 +42,7 @@ export default function ListingModal({ isOpen, onClose, artworkId, tokenAddress,
 
     const isApproved = approvedAddress === AETHERIA_MARKETPLACE_ADDRESS || isApprovedForAll;
 
-    // Approve Contract Hooks
+    // Approve Contract Hook
     const { writeContractAsync: approveContract } = useWriteContract();
 
     // List Item Hook

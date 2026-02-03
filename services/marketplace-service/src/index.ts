@@ -29,7 +29,7 @@ import { ethers } from 'ethers';
 (BigInt.prototype as any).toJSON = function () { return this.toString(); };
 
 const RPC_URL = process.env.VITE_ALCHEMY_URL || 'https://eth-sepolia.g.alchemy.com/v2/aAXCymUE_AGvFG7TT9dZh'; // Fallback to a known public one if env missing
-const MARKETPLACE_ADDRESS = process.env.CONTRACT_ADDRESS || '0x4094E5C4E238F81c25d048427Ac6DbA8Ef93Cdee';
+const MARKETPLACE_ADDRESS = process.env.MARKETPLACE_ADDRESS || '';
 
 const MARKETPLACE_ABI = [
     "event ItemListed(uint256 indexed listingId, address indexed seller, address indexed tokenAddress, uint256 tokenId, uint256 startPrice, uint256 endPrice, uint256 startTime, uint256 duration)",
